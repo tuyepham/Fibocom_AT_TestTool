@@ -34,6 +34,38 @@ namespace AT_command_test
             InitBaudRates();
             ScanComPorts();
             AutoDetectLocal1MFile();
+            InitializeQuickButtons();
+        }
+
+        private void InitializeQuickButtons()
+        {
+            ConfigureQuickButton(btnQuickAT, "AT", "AT");
+            ConfigureQuickButton(btnQuickATI, "ATI", "ATI");
+            ConfigureQuickButton(btnQuickATI7, "ATI7 (Ver)", "ATI7");
+            ConfigureQuickButton(btnQuickCPIN, "AT+CPIN?", "AT+CPIN?");
+            ConfigureQuickButton(btnQuickCSQ, "AT+CSQ", "AT+CSQ");
+            ConfigureQuickButton(btnQuickCREG, "AT+CREG?", "AT+CREG?");
+            ConfigureQuickButton(btnQuickCEREG, "AT+CEREG?", "AT+CEREG?");
+            ConfigureQuickButton(btnQuickCOPS, "AT+COPS?", "AT+COPS?");
+            ConfigureQuickButton(btnQuickCGATT, "AT+CGATT?", "AT+CGATT?");
+            ConfigureQuickButton(btnQuickGTFLIST, "📁 AT+GTFLIST", "AT+GTFLIST");
+
+            btnQuickGTFLIST.BackColor = Color.FromArgb(0, 121, 107);
+            btnQuickGTFLIST.ForeColor = Color.White;
+            btnQuickGTFLIST.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
+        }
+
+        private void ConfigureQuickButton(Button? btn, string text, string command)
+        {
+            if (btn == null) return;
+            btn.Text = text;
+            btn.Tag = command;
+            btn.AutoSize = true;
+            btn.Height = 27;
+            btn.Margin = new Padding(3, 1, 3, 1);
+            btn.UseVisualStyleBackColor = (btn != btnQuickGTFLIST);
+            btn.Click -= QuickCommand_Click;
+            btn.Click += QuickCommand_Click;
         }
 
         private void AutoDetectLocal1MFile()
@@ -327,7 +359,7 @@ namespace AT_command_test
             }
         }
 
-        private void QuickCommand_Click(object sender, EventArgs e)
+        private void QuickCommand_Click(object? sender, EventArgs e)
         {
             if (sender is Button btn && btn.Tag is string cmd)
             {
@@ -628,17 +660,17 @@ namespace AT_command_test
                 return;
             }
 
-            string localPath = ResolveLocalFilePath(txtLocalFile.Text.Trim());
-            if (!File.Exists(localPath))
+            string initialLocalPath = ResolveLocalFilePath(txtLocalFile.Text.Trim());
+            string? localDir = Path.GetDirectoryName(initialLocalPath);
+            if (string.IsNullOrEmpty(localDir) || !Directory.Exists(localDir))
             {
-                MessageBox.Show($"Local reference file not found:\n{localPath}\nPlease place 1M.txt in the application directory or use Browse.", "Missing Local File", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
+                localDir = AppDomain.CurrentDomain.BaseDirectory;
             }
 
-            string url = txtHttpUrl.Text.Trim();
-            if (string.IsNullOrEmpty(url))
+            string baseUrl = txtHttpUrl.Text.Trim();
+            if (string.IsNullOrEmpty(baseUrl))
             {
-                MessageBox.Show("Please enter the HTTP Server URL for 1M.txt!", "Missing URL", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show("Please enter the HTTP Server URL!", "Missing URL", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
@@ -648,45 +680,181 @@ namespace AT_command_test
                 timeoutSec = parsedTimeout;
             }
 
+            int totalLoops = 1;
+            if (int.TryParse(txtLoopCount.Text.Trim(), out int parsedLoops) && parsedLoops > 0)
+            {
+                totalLoops = parsedLoops;
+            }
+
             int chunkSizeBytes = GetConfiguredChunkSizeBytes();
             int chunkKb = chunkSizeBytes / 1024;
 
             _testCts = new CancellationTokenSource();
-            btnRun1MTest.Text = "⏹ Stop 1M Test";
+            btnRun1MTest.Text = totalLoops > 1 ? $"⏹ Stop Test (0/{totalLoops})" : "⏹ Stop 1M Test";
             btnRun1MTest.BackColor = Color.FromArgb(198, 40, 40); // Red
-            lblCrcVerdict.Text = $"Status: Downloading 1M.txt (Timeout: {timeoutSec}s)...";
-            lblCrcVerdict.ForeColor = Color.FromArgb(230, 81, 0); // Orange
+            lblDownloadState.Text = totalLoops > 1 
+                ? $"State: Starting {totalLoops} alternating loops..." 
+                : $"State: Starting download (Timeout: {timeoutSec}s)...";
+            lblDownloadState.ForeColor = Color.FromArgb(21, 101, 192); // Blue
             prg1M.Value = 0;
-            lblProgress.Text = "Starting download...";
+            lblProgress.Text = "Starting test...";
 
             AppendLog("==================================================", LogType.Info);
-            AppendLog(">>> STARTING 1MB HTTP DOWNLOAD & CRC16 TEST <<<", LogType.Info);
-            AppendLog($"  Target URL  : {url}", LogType.Info);
+            AppendLog(totalLoops > 1 
+                ? $">>> STARTING MULTI-LOOP HTTP TEST ({totalLoops} LOOPS ALTERNATING 1M & 1M_OVER) <<<" 
+                : ">>> STARTING 1MB HTTP DOWNLOAD & CRC16 TEST <<<", LogType.Info);
+            AppendLog($"  Base URL    : {baseUrl}", LogType.Info);
+            AppendLog($"  Total Loops : {totalLoops}", LogType.Info);
             AppendLog($"  Wait Timeout: {timeoutSec}s", LogType.Info);
             AppendLog($"  Read Chunk  : {chunkKb} KB ({chunkSizeBytes:N0} bytes)", LogType.Info);
-            AppendLog($"  Local Ref   : {localPath}", LogType.Info);
+            AppendLog($"  Local Dir   : {localDir}", LogType.Info);
             AppendLog("==================================================", LogType.Info);
+
+            int passCount = 0;
+            int failCount = 0;
+            var failedLoops = new List<int>();
 
             try
             {
-                // 1. Calculate Local Reference Checksums (Streaming calculation)
-                var localReport = await Crc16Helper.AnalyzeFileStreamAsync(localPath, _testCts.Token);
-                AppendLog($"[LOCAL] Size: {localReport.ByteCount:N0} bytes | CRC16-CCITT: 0x{localReport.Crc16Ccitt:X4} | Modbus: 0x{localReport.Crc16Modbus:X4} | MD5: {localReport.Md5}", LogType.Info);
+                // Step 0: Activate network PDP context once before starting loops
+                AppendLog("--- [Setup] Activating PDP Context (at+mipcall=1) ---", LogType.Info);
+                var rPdp = await SendAndAwaitResponseAsync("at+mipcall=1", new[] { "OK" }, 12000, _testCts.Token, postDelayMs: 2000);
+                if (!rPdp.success && !rPdp.response.Contains("+MIPCALL:"))
+                {
+                    throw new Exception("at+mipcall=1 failed to activate network context.");
+                }
+                await Task.Delay(1000, _testCts.Token);
 
-                // 2. Run Module Download & Verification Flow
-                await Execute1MDownloadAndVerifyAsync(url, localPath, localReport, timeoutSec, _testCts.Token);
+                for (int loop = 1; loop <= totalLoops; loop++)
+                {
+                    _testCts.Token.ThrowIfCancellationRequested();
+
+                    // Determine alternating target file:
+                    // If totalLoops == 1: use currently chosen file
+                    // If totalLoops > 1: odd loop -> 1M.txt, even loop -> 1M_Over.txt
+                    string targetFileName;
+                    if (totalLoops == 1)
+                    {
+                        targetFileName = Path.GetFileName(initialLocalPath);
+                        if (string.IsNullOrWhiteSpace(targetFileName)) targetFileName = "1M.txt";
+                    }
+                    else
+                    {
+                        targetFileName = (loop % 2 == 1) ? "1M.txt" : "1M_Over.txt";
+                    }
+
+                    string currentLocalPath = Path.Combine(localDir, targetFileName);
+                    if (!File.Exists(currentLocalPath))
+                    {
+                        currentLocalPath = ResolveLocalFilePath(targetFileName);
+                        if (!File.Exists(currentLocalPath))
+                        {
+                            throw new FileNotFoundException($"Reference file not found for loop {loop}: {targetFileName}");
+                        }
+                    }
+
+                    string currentUrl = ReplaceUrlFileName(baseUrl, targetFileName);
+                    string currentModuleFile = $"/mnt/userdata/{targetFileName}";
+
+                    // Synchronize UI
+                    try
+                    {
+                        _isSyncingUrlAndLocalFile = true;
+                        txtHttpUrl.Text = currentUrl;
+                        txtDownloadFile.Text = currentModuleFile;
+                        txtLocalFile.Text = currentLocalPath;
+                    }
+                    finally
+                    {
+                        _isSyncingUrlAndLocalFile = false;
+                    }
+
+                    btnRun1MTest.Text = totalLoops > 1 ? $"⏹ Stop Test ({loop}/{totalLoops})" : "⏹ Stop 1M Test";
+                    lblDownloadState.Text = totalLoops > 1 
+                        ? $"State: [Loop {loop}/{totalLoops}] Downloading {targetFileName}..." 
+                        : $"State: Downloading {targetFileName} from server...";
+                    lblDownloadState.ForeColor = Color.FromArgb(21, 101, 192);
+
+                    AppendLog("--------------------------------------------------", LogType.Info);
+                    AppendLog($">>> [LOOP {loop}/{totalLoops}] TARGET FILE: '{targetFileName}' <<<", LogType.Info);
+                    AppendLog($"  URL        : {currentUrl}", LogType.Info);
+                    AppendLog($"  Module File: {currentModuleFile}", LogType.Info);
+                    AppendLog($"  Local File : {currentLocalPath}", LogType.Info);
+
+                    // 1. Calculate Local Reference Checksums
+                    var localReport = await Crc16Helper.AnalyzeFileStreamAsync(currentLocalPath, _testCts.Token);
+                    AppendLog($"[LOCAL {targetFileName}] Size: {localReport.ByteCount:N0} bytes | CRC16-CCITT: 0x{localReport.Crc16Ccitt:X4} | Modbus: 0x{localReport.Crc16Modbus:X4}", LogType.Info);
+
+                    // 2. Download from Module and Verify
+                    bool isMatch = await Execute1MDownloadAndVerifyAsync(
+                        currentUrl, 
+                        currentLocalPath, 
+                        currentModuleFile, 
+                        localReport, 
+                        timeoutSec, 
+                        chunkSizeBytes, 
+                        totalLoops <= 1, 
+                        loop, 
+                        totalLoops, 
+                        _testCts.Token);
+
+                    if (isMatch)
+                    {
+                        passCount++;
+                        AppendLog($">>> [LOOP {loop}/{totalLoops} RESULT: PASS] CRC16 MATCH (0x{localReport.Crc16Ccitt:X4}) <<<", LogType.Info);
+                    }
+                    else
+                    {
+                        failCount++;
+                        failedLoops.Add(loop);
+                        AppendLog($">>> [LOOP {loop}/{totalLoops} RESULT: FAIL] CRC16 MISMATCH detected! <<<", LogType.Error);
+                    }
+
+                    lblCrcVerdict.Text = totalLoops > 1 
+                        ? $"[Loop {loop}/{totalLoops}] {(isMatch ? "PASS" : "FAIL")} | Total Pass: {passCount}, Fail: {failCount}" 
+                        : (isMatch ? $"[PASS] CRC16 MATCH: 0x{localReport.Crc16Ccitt:X4} (100% Identical)" : $"[FAIL] MISMATCH: 0x{localReport.Crc16Ccitt:X4}");
+                    lblCrcVerdict.ForeColor = (failCount == 0) ? Color.FromArgb(46, 125, 50) : Color.FromArgb(198, 40, 40);
+
+                    if (loop < totalLoops)
+                    {
+                        AppendLog($"Cooldown: waiting 1.5s before next loop ({loop + 1}/{totalLoops})...", LogType.Info);
+                        await Task.Delay(1500, _testCts.Token);
+                    }
+                }
+
+                // Summary for multi-loop test
+                if (totalLoops > 1)
+                {
+                    AppendLog("==================================================", LogType.Info);
+                    AppendLog(">>> MULTI-LOOP TEST SUMMARY <<<", LogType.Info);
+                    AppendLog($"  Total Loops  : {totalLoops}", LogType.Info);
+                    AppendLog($"  Passed       : {passCount} ({(passCount * 100.0 / totalLoops):F1}%)", LogType.Info);
+                    AppendLog($"  Failed       : {failCount} ({(failCount * 100.0 / totalLoops):F1}%)", (failCount > 0) ? LogType.Error : LogType.Info);
+                    if (failedLoops.Count > 0)
+                    {
+                        AppendLog($"  Failed Loops : {string.Join(", ", failedLoops)}", LogType.Error);
+                    }
+                    AppendLog("==================================================", LogType.Info);
+
+                    string summaryMsg = $"Completed {totalLoops} alternating loops!\n\nPassed: {passCount} / {totalLoops} ({(passCount * 100.0 / totalLoops):F1}%)\nFailed: {failCount} / {totalLoops}";
+                    if (failedLoops.Count > 0)
+                    {
+                        summaryMsg += $"\nFailed loops: {string.Join(", ", failedLoops)}";
+                    }
+                    MessageBox.Show(summaryMsg, failCount == 0 ? "Test Completed: ALL PASSED" : "Test Completed: WITH FAILURES", MessageBoxButtons.OK, failCount == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+                }
             }
             catch (OperationCanceledException)
             {
-                AppendLog(">>> [STOPPED] 1MB Download & CRC test cancelled by user.", LogType.Error);
-                lblCrcVerdict.Text = "Status: Test Cancelled";
-                lblCrcVerdict.ForeColor = Color.Red;
+                AppendLog($">>> [STOPPED] Test cancelled by user at loop (Pass: {passCount}, Fail: {failCount}).", LogType.Error);
+                lblDownloadState.Text = $"State: Test Cancelled (Completed: {passCount + failCount}/{totalLoops})";
+                lblDownloadState.ForeColor = Color.Red;
             }
             catch (Exception ex)
             {
-                AppendLog($">>> [FAILED] 1MB Test Error: {ex.Message}", LogType.Error);
-                lblCrcVerdict.Text = $"Status: FAILED ({ex.Message})";
-                lblCrcVerdict.ForeColor = Color.Red;
+                AppendLog($">>> [FAILED] Test Error: {ex.Message}", LogType.Error);
+                lblDownloadState.Text = $"State: FAILED ({ex.Message})";
+                lblDownloadState.ForeColor = Color.Red;
             }
             finally
             {
@@ -706,23 +874,23 @@ namespace AT_command_test
 
                 _testCts?.Dispose();
                 _testCts = null;
-                btnRun1MTest.Text = "🚀 Download 1M & Verify CRC16";
+                btnRun1MTest.Text = "🚀 Download & Verify CRC16";
                 btnRun1MTest.BackColor = Color.FromArgb(230, 81, 0);
             }
         }
 
-        private async Task Execute1MDownloadAndVerifyAsync(string url, string localPath, Crc16Helper.ChecksumReport localReport, int waitTimeoutSec, CancellationToken ct)
+        private async Task<bool> Execute1MDownloadAndVerifyAsync(
+            string url, 
+            string localPath, 
+            string moduleFilePath,
+            Crc16Helper.ChecksumReport localReport, 
+            int waitTimeoutSec, 
+            int maxChunkSize,
+            bool showMessageBox,
+            int currentLoop,
+            int totalLoops,
+            CancellationToken ct)
         {
-            string moduleFilePath = txtDownloadFile.Text.Trim();
-            if (string.IsNullOrEmpty(moduleFilePath))
-            {
-                moduleFilePath = "/mnt/userdata/test.bin";
-            }
-            else if (!moduleFilePath.StartsWith("/"))
-            {
-                moduleFilePath = $"/mnt/userdata/{moduleFilePath}";
-            }
-
             // Determine local save path in the exact same directory as local reference file
             string? localDir = Path.GetDirectoryName(localPath);
             if (string.IsNullOrEmpty(localDir))
@@ -730,27 +898,11 @@ namespace AT_command_test
                 localDir = AppDomain.CurrentDomain.BaseDirectory;
             }
 
-            // Derive downloaded file name from URL (e.g. http://.../1M.txt -> 1M_download.txt)
-            string sourceFileName = "";
-            try
-            {
-                if (Uri.TryCreate(url, UriKind.Absolute, out Uri? parsedUri))
-                {
-                    sourceFileName = Path.GetFileName(parsedUri.LocalPath);
-                }
-                else
-                {
-                    sourceFileName = Path.GetFileName(url);
-                }
-            }
-            catch
-            {
-                sourceFileName = Path.GetFileName(localPath);
-            }
-
+            // Derive downloaded file name from local/URL (e.g. 1M.txt -> 1M_download.txt, 1M_Over.txt -> 1M_Over_download.txt)
+            string sourceFileName = Path.GetFileName(localPath);
             if (string.IsNullOrWhiteSpace(sourceFileName))
             {
-                sourceFileName = Path.GetFileName(localPath);
+                sourceFileName = Path.GetFileName(url);
             }
 
             string baseName = Path.GetFileNameWithoutExtension(sourceFileName);
@@ -763,34 +915,39 @@ namespace AT_command_test
 
             string saveDownloadedPath = Path.Combine(localDir, $"{baseName}_download{ext}");
 
-            // Step 1: PDP Activation
-            AppendLog("--- [1/7] Activating PDP Context (at+mipcall=1) ---", LogType.Info);
-            lblProgress.Text = "Activating network PDP...";
+            // Step 1: Ensure PDP context is ready
+            AppendLog("--- [1/7] Checking PDP Context ---", LogType.Info);
+            lblDownloadState.Text = $"State: [Loop {currentLoop}/{totalLoops}] Checking network PDP...";
+            lblProgress.Text = "Checking PDP...";
             prg1M.Value = 5;
-            var r1 = await SendAndAwaitResponseAsync("at+mipcall=1", new[] { "OK" }, 12000, ct, postDelayMs: 2000);
+            var r1 = await SendAndAwaitResponseAsync("at+mipcall=1", new[] { "OK" }, 6000, ct, postDelayMs: 200);
             if (!r1.success && !r1.response.Contains("+MIPCALL:"))
             {
-                throw new Exception("at+mipcall=1 failed to activate network context.");
+                // Already active or error, proceed
             }
-            await Task.Delay(1000, ct);
+            await Task.Delay(200, ct);
 
             // Step 2: Set HTTP URL
             AppendLog($"--- [2/7] Setting HTTP URL ({url}) ---", LogType.Info);
-            lblProgress.Text = "Configuring HTTP URL...";
+            lblDownloadState.Text = $"State: [Loop {currentLoop}/{totalLoops}] Configuring HTTP URL...";
+            lblProgress.Text = "Configuring URL...";
             prg1M.Value = 10;
             var r2 = await SendAndAwaitResponseAsync($"AT+HTTPSET=\"URL\",\"{url}\"", new[] { "OK" }, 6000, ct);
             if (!r2.success) throw new Exception("AT+HTTPSET URL failed.");
-            await Task.Delay(500, ct);
+            await Task.Delay(400, ct);
 
-            // Step 3: Set Destination File
+            // Step 3: Clean Module Flash & Set Destination
             AppendLog($"--- [3/7] Setting Download Destination ({moduleFilePath}) ---", LogType.Info);
-            lblProgress.Text = "Setting file destination...";
+            lblDownloadState.Text = $"State: [Loop {currentLoop}/{totalLoops}] Cleaning flash & setting destination...";
+            lblProgress.Text = "Cleaning flash...";
             prg1M.Value = 15;
+
+            // Delete existing file on flash to guarantee clean sectors and avoid dirty overwrite
+            await SendAndAwaitResponseAsync($"AT+GTFDELETE=\"{moduleFilePath}\"", new[] { "OK", "ERROR" }, 3000, ct, postDelayMs: 200);
+
             var r3 = await SendAndAwaitResponseAsync($"AT+HTTPSET=\"DOWNLOADFILE\",\"{moduleFilePath}\"", new[] { "OK" }, 6000, ct);
             if (!r3.success) throw new Exception("AT+HTTPSET DOWNLOADFILE failed.");
-            await Task.Delay(500, ct);
-
-            // NOTE: AT+HTTPSET? was removed per user request (not needed).
+            await Task.Delay(400, ct);
 
             // Step 4: Execute HTTP GET Download
             // Explicitly use AT+HTTPACT=0,60 (60 is the maximum timeout parameter allowed on Fibocom L716)
@@ -798,7 +955,8 @@ namespace AT_command_test
 
             AppendLog($"--- [4/7] Triggering HTTP Download ({actCmd}) ---", LogType.Info);
             AppendLog($"Waiting up to {waitTimeoutSec}s for download to complete (+HTTPRES:)...", LogType.Info);
-            lblProgress.Text = $"Downloading 1M.txt from HTTP server (timeout: {waitTimeoutSec}s)...";
+            lblDownloadState.Text = $"State: [Loop {currentLoop}/{totalLoops}] Downloading {sourceFileName} (timeout: {waitTimeoutSec}s)...";
+            lblProgress.Text = $"Waiting +HTTPRES:...";
             prg1M.Value = 25;
 
             // Clear buffer right before trigger
@@ -830,13 +988,15 @@ namespace AT_command_test
 
             AppendLog("Download to module storage completed (+HTTPRES: received)!", LogType.Info);
             AppendLog("Waiting 3s for module to finish writing data to flash storage...", LogType.Info);
-            lblProgress.Text = "Flushing flash storage (waiting 3s)...";
+            lblDownloadState.Text = $"State: [Loop {currentLoop}/{totalLoops}] Flushing flash storage (waiting 3s)...";
+            lblProgress.Text = "Flushing flash (3s)...";
             prg1M.Value = 40;
             await Task.Delay(3000, ct);
 
             // Step 5: Verify file existence and size via AT+GTFLIST
             AppendLog("--- [5/7] Verifying File Existence in Module Storage ---", LogType.Info);
-            lblProgress.Text = "Verifying downloaded file in module...";
+            lblDownloadState.Text = $"State: [Loop {currentLoop}/{totalLoops}] Verifying downloaded file in module storage...";
+            lblProgress.Text = "Verifying file...";
             var r6 = await SendAndAwaitResponseAsync("AT+GTFLIST", new[] { "OK" }, 6000, ct);
             string targetFileName = Path.GetFileName(moduleFilePath);
             if (!r6.success || !r6.response.Contains(targetFileName, StringComparison.OrdinalIgnoreCase))
@@ -847,7 +1007,7 @@ namespace AT_command_test
 
             // Step 6: Open File and query size
             AppendLog($"--- [6/7] Opening Downloaded File on Module ({moduleFilePath}) ---", LogType.Info);
-            lblProgress.Text = "Opening file descriptor...";
+            lblProgress.Text = $"[Loop {currentLoop}/{totalLoops}] Opening file descriptor...";
             var r7 = await SendAndAwaitResponseAsync($"AT+GTFOPEN=\"{moduleFilePath}\",0", new[] { "OK" }, 6000, ct);
             if (!r7.success) throw new Exception($"AT+GTFOPEN failed to open {moduleFilePath}.");
 
@@ -870,15 +1030,14 @@ namespace AT_command_test
             }
             AppendLog($"Module File Size: {moduleFileSize:N0} bytes (Expected: {localReport.ByteCount:N0} bytes)", LogType.Info);
 
-            // Step 7: Read Module File Data & Calculate CRC16 (configurable chunk size, default 200KB)
-            int maxChunkSize = GetConfiguredChunkSizeBytes();
+            // Step 7: Read Module File Data & Calculate CRC16 (configurable chunk size)
             int chunkKb = maxChunkSize / 1024;
             AppendLog($"--- [7/7] Reading Module File Data & Calculating CRC16 ({moduleFileSize:N0} bytes) ---", LogType.Info);
 
             int totalChunks = (int)Math.Ceiling((double)moduleFileSize / maxChunkSize);
             AppendLog($"Reading {moduleFileSize:N0} bytes in {totalChunks} chunks of {chunkKb}KB ({maxChunkSize:N0} bytes) each.", LogType.Info);
 
-            lblProgress.Text = $"Reading from module: 0 / {moduleFileSize:N0} bytes (0%)";
+            lblProgress.Text = $"[Loop {currentLoop}/{totalLoops}] Reading: 0 / {moduleFileSize:N0} bytes (0%)";
 
             using var rollingCalc = new Crc16Helper.RollingChecksumCalculator();
             int bytesRead = 0;
@@ -896,7 +1055,7 @@ namespace AT_command_test
                         chunkIndex++;
                         int toRead = Math.Min(maxChunkSize, moduleFileSize - bytesRead);
 
-                        lblProgress.Text = $"Reading chunk {chunkIndex}/{totalChunks} ({toRead:N0} bytes)...";
+                        lblProgress.Text = $"[Loop {currentLoop}/{totalLoops}] Chunk {chunkIndex}/{totalChunks} ({toRead:N0} bytes)...";
                         var (chunkSuccess, chunkData) = await ReadFileChunkAsync(fileId, toRead, ct);
                         if (!chunkSuccess || chunkData.Length == 0)
                         {
@@ -914,7 +1073,8 @@ namespace AT_command_test
 
                         int progressPercent = 40 + (int)((bytesRead / (double)moduleFileSize) * 55); // scale 40% to 95%
                         prg1M.Value = Math.Min(progressPercent, 95);
-                        lblProgress.Text = $"Read & computed CRC16: {bytesRead:N0} / {moduleFileSize:N0} bytes ({(bytesRead * 100) / moduleFileSize}%)";
+                        lblDownloadState.Text = $"State: [Loop {currentLoop}/{totalLoops}] Reading chunk {chunkIndex}/{totalChunks} ({toRead:N0} bytes)...";
+                        lblProgress.Text = $"{bytesRead:N0} / {moduleFileSize:N0} bytes ({(bytesRead * 100) / moduleFileSize}%)";
 
                         int logInterval = Math.Min(64, Math.Max(1, totalChunks / 10));
                         if (chunkIndex % logInterval == 0 || bytesRead >= moduleFileSize || chunkIndex == 1)
@@ -940,12 +1100,12 @@ namespace AT_command_test
             var moduleReport = rollingCalc.FinalizeReport();
 
             prg1M.Value = 100;
-            lblProgress.Text = $"Completed: Read {moduleReport.ByteCount:N0} bytes.";
+            lblProgress.Text = $"[Loop {currentLoop}/{totalLoops}] Done: {moduleReport.ByteCount:N0} bytes.";
             AppendLog($"[FILE SAVED] Downloaded file saved to disk: {saveDownloadedPath}", LogType.Info);
 
             // Log Complete Comparison
             AppendLog("==================================================", LogType.Info);
-            AppendLog(">>> CRC16 INTEGRITY COMPARISON REPORT <<<", LogType.Info);
+            AppendLog($">>> CRC16 INTEGRITY REPORT (LOOP {currentLoop}/{totalLoops}) <<<", LogType.Info);
             AppendLog($"  Local Ref File   : {localReport.ByteCount:N0} bytes", LogType.Info);
             AppendLog($"  Downloaded File  : {moduleReport.ByteCount:N0} bytes -> {saveDownloadedPath}", LogType.Info);
             AppendLog($"  Local CRC16-CCITT  : 0x{localReport.Crc16Ccitt:X4}", LogType.Info);
@@ -961,18 +1121,25 @@ namespace AT_command_test
             if (isMatch)
             {
                 AppendLog($">>> [PASS] CRC16 MATCH (0x{moduleReport.Crc16Ccitt:X4}): FILES ARE 100% IDENTICAL! <<<", LogType.Info);
-                lblCrcVerdict.Text = $"[PASS] CRC16 MATCH: 0x{moduleReport.Crc16Ccitt:X4} (100% Identical)";
-                lblCrcVerdict.ForeColor = Color.FromArgb(46, 125, 50); // Dark Green
-                MessageBox.Show($"Verification PASSED!\n\nCRC16-CCITT: 0x{moduleReport.Crc16Ccitt:X4}\nCRC16-Modbus: 0x{moduleReport.Crc16Modbus:X4}\nSize: {moduleReport.ByteCount:N0} bytes\n\nDownloaded file saved to:\n{saveDownloadedPath}", "Integrity Check: PASSED", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                if (showMessageBox)
+                {
+                    lblCrcVerdict.Text = $"[PASS] CRC16 MATCH: 0x{moduleReport.Crc16Ccitt:X4} (100% Identical)";
+                    lblCrcVerdict.ForeColor = Color.FromArgb(46, 125, 50); // Dark Green
+                    MessageBox.Show($"Verification PASSED!\n\nCRC16-CCITT: 0x{moduleReport.Crc16Ccitt:X4}\nCRC16-Modbus: 0x{moduleReport.Crc16Modbus:X4}\nSize: {moduleReport.ByteCount:N0} bytes\n\nDownloaded file saved to:\n{saveDownloadedPath}", "Integrity Check: PASSED", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
             }
             else
             {
                 AppendLog($">>> [FAIL] CRC16 MISMATCH: Module (0x{moduleReport.Crc16Ccitt:X4}) != Local (0x{localReport.Crc16Ccitt:X4}) <<<", LogType.Error);
-                lblCrcVerdict.Text = $"[FAIL] MISMATCH: Module 0x{moduleReport.Crc16Ccitt:X4} != Local 0x{localReport.Crc16Ccitt:X4}";
-                lblCrcVerdict.ForeColor = Color.FromArgb(198, 40, 40); // Dark Red
-                MessageBox.Show($"Verification FAILED!\n\nLocal CRC16: 0x{localReport.Crc16Ccitt:X4} ({localReport.ByteCount:N0} bytes)\nModule CRC16: 0x{moduleReport.Crc16Ccitt:X4} ({moduleReport.ByteCount:N0} bytes)\n\nData mismatch detected!\nDownloaded file saved for inspection to:\n{saveDownloadedPath}", "Integrity Check: FAILED", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                if (showMessageBox)
+                {
+                    lblCrcVerdict.Text = $"[FAIL] MISMATCH: Module 0x{moduleReport.Crc16Ccitt:X4} != Local 0x{localReport.Crc16Ccitt:X4}";
+                    lblCrcVerdict.ForeColor = Color.FromArgb(198, 40, 40); // Dark Red
+                    MessageBox.Show($"Verification FAILED!\n\nLocal CRC16: 0x{localReport.Crc16Ccitt:X4} ({localReport.ByteCount:N0} bytes)\nModule CRC16: 0x{moduleReport.Crc16Ccitt:X4} ({moduleReport.ByteCount:N0} bytes)\n\nData mismatch detected!\nDownloaded file saved for inspection to:\n{saveDownloadedPath}", "Integrity Check: FAILED", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
             }
             AppendLog("==================================================", LogType.Info);
+            return isMatch;
         }
 
         /// <summary>
@@ -1011,7 +1178,8 @@ namespace AT_command_test
 
                 elapsed++;
                 int remaining = Math.Max(0, (int)(deadline - DateTime.Now).TotalSeconds);
-                lblProgress.Text = $"Downloading from HTTP server... (Elapsed: {elapsed}s / {timeoutSeconds}s, remaining: {remaining}s)";
+                lblDownloadState.Text = $"State: Downloading from HTTP server... ({elapsed}s / {timeoutSeconds}s, remaining: {remaining}s)";
+                lblProgress.Text = $"Waiting: {elapsed}s / {timeoutSeconds}s";
 
                 int progressVal = 25 + Math.Min(15, (elapsed * 15) / timeoutSeconds);
                 prg1M.Value = Math.Min(progressVal, 40);
