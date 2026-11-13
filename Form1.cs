@@ -21,7 +21,8 @@ namespace AT_command_test
             Info,
             Tx,
             Rx,
-            Error
+            Error,
+            Success
         }
 
         public Form1()
@@ -793,7 +794,6 @@ namespace AT_command_test
                         localReport, 
                         timeoutSec, 
                         chunkSizeBytes, 
-                        totalLoops <= 1, 
                         loop, 
                         totalLoops, 
                         _testCts.Token);
@@ -801,7 +801,7 @@ namespace AT_command_test
                     if (isMatch)
                     {
                         passCount++;
-                        AppendLog($">>> [LOOP {loop}/{totalLoops} RESULT: PASS] CRC16 MATCH (0x{localReport.Crc16Ccitt:X4}) <<<", LogType.Info);
+                        AppendLog($">>> [LOOP {loop}/{totalLoops} RESULT: PASS] CRC16 MATCH (0x{localReport.Crc16Ccitt:X4}) <<<", LogType.Success);
                     }
                     else
                     {
@@ -828,20 +828,24 @@ namespace AT_command_test
                     AppendLog("==================================================", LogType.Info);
                     AppendLog(">>> MULTI-LOOP TEST SUMMARY <<<", LogType.Info);
                     AppendLog($"  Total Loops  : {totalLoops}", LogType.Info);
-                    AppendLog($"  Passed       : {passCount} ({(passCount * 100.0 / totalLoops):F1}%)", LogType.Info);
+                    AppendLog($"  Passed       : {passCount} ({(passCount * 100.0 / totalLoops):F1}%)", LogType.Success);
                     AppendLog($"  Failed       : {failCount} ({(failCount * 100.0 / totalLoops):F1}%)", (failCount > 0) ? LogType.Error : LogType.Info);
                     if (failedLoops.Count > 0)
                     {
                         AppendLog($"  Failed Loops : {string.Join(", ", failedLoops)}", LogType.Error);
                     }
+                    AppendLog($"  Verdict      : {(failCount == 0 ? "ALL PASSED" : "WITH FAILURES")}", failCount == 0 ? LogType.Success : LogType.Error);
                     AppendLog("==================================================", LogType.Info);
 
-                    string summaryMsg = $"Completed {totalLoops} alternating loops!\n\nPassed: {passCount} / {totalLoops} ({(passCount * 100.0 / totalLoops):F1}%)\nFailed: {failCount} / {totalLoops}";
-                    if (failedLoops.Count > 0)
-                    {
-                        summaryMsg += $"\nFailed loops: {string.Join(", ", failedLoops)}";
-                    }
-                    MessageBox.Show(summaryMsg, failCount == 0 ? "Test Completed: ALL PASSED" : "Test Completed: WITH FAILURES", MessageBoxButtons.OK, failCount == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+                    lblDownloadState.Text = $"State: Completed {totalLoops} loops (Pass: {passCount}, Fail: {failCount})";
+                    lblDownloadState.ForeColor = (failCount == 0) ? Color.FromArgb(46, 125, 50) : Color.FromArgb(198, 40, 40);
+                }
+                else
+                {
+                    lblDownloadState.Text = (passCount > 0)
+                        ? "State: Completed successfully - PASS"
+                        : "State: Completed with errors - FAIL";
+                    lblDownloadState.ForeColor = (passCount > 0) ? Color.FromArgb(46, 125, 50) : Color.FromArgb(198, 40, 40);
                 }
             }
             catch (OperationCanceledException)
@@ -886,7 +890,6 @@ namespace AT_command_test
             Crc16Helper.ChecksumReport localReport, 
             int waitTimeoutSec, 
             int maxChunkSize,
-            bool showMessageBox,
             int currentLoop,
             int totalLoops,
             CancellationToken ct)
@@ -1120,23 +1123,19 @@ namespace AT_command_test
 
             if (isMatch)
             {
-                AppendLog($">>> [PASS] CRC16 MATCH (0x{moduleReport.Crc16Ccitt:X4}): FILES ARE 100% IDENTICAL! <<<", LogType.Info);
-                if (showMessageBox)
-                {
-                    lblCrcVerdict.Text = $"[PASS] CRC16 MATCH: 0x{moduleReport.Crc16Ccitt:X4} (100% Identical)";
-                    lblCrcVerdict.ForeColor = Color.FromArgb(46, 125, 50); // Dark Green
-                    MessageBox.Show($"Verification PASSED!\n\nCRC16-CCITT: 0x{moduleReport.Crc16Ccitt:X4}\nCRC16-Modbus: 0x{moduleReport.Crc16Modbus:X4}\nSize: {moduleReport.ByteCount:N0} bytes\n\nDownloaded file saved to:\n{saveDownloadedPath}", "Integrity Check: PASSED", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                }
+                AppendLog($">>> [PASS] CRC16 MATCH (0x{moduleReport.Crc16Ccitt:X4}): FILES ARE 100% IDENTICAL! <<<", LogType.Success);
+                lblCrcVerdict.Text = totalLoops > 1 
+                    ? $"[Loop {currentLoop}/{totalLoops}] PASS | CRC16: 0x{moduleReport.Crc16Ccitt:X4}"
+                    : $"[PASS] CRC16 MATCH: 0x{moduleReport.Crc16Ccitt:X4} (100% Identical)";
+                lblCrcVerdict.ForeColor = Color.FromArgb(46, 125, 50); // Dark Green
             }
             else
             {
                 AppendLog($">>> [FAIL] CRC16 MISMATCH: Module (0x{moduleReport.Crc16Ccitt:X4}) != Local (0x{localReport.Crc16Ccitt:X4}) <<<", LogType.Error);
-                if (showMessageBox)
-                {
-                    lblCrcVerdict.Text = $"[FAIL] MISMATCH: Module 0x{moduleReport.Crc16Ccitt:X4} != Local 0x{localReport.Crc16Ccitt:X4}";
-                    lblCrcVerdict.ForeColor = Color.FromArgb(198, 40, 40); // Dark Red
-                    MessageBox.Show($"Verification FAILED!\n\nLocal CRC16: 0x{localReport.Crc16Ccitt:X4} ({localReport.ByteCount:N0} bytes)\nModule CRC16: 0x{moduleReport.Crc16Ccitt:X4} ({moduleReport.ByteCount:N0} bytes)\n\nData mismatch detected!\nDownloaded file saved for inspection to:\n{saveDownloadedPath}", "Integrity Check: FAILED", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
+                lblCrcVerdict.Text = totalLoops > 1 
+                    ? $"[Loop {currentLoop}/{totalLoops}] FAIL | Module 0x{moduleReport.Crc16Ccitt:X4} != Local 0x{localReport.Crc16Ccitt:X4}"
+                    : $"[FAIL] MISMATCH: Module 0x{moduleReport.Crc16Ccitt:X4} != Local 0x{localReport.Crc16Ccitt:X4}";
+                lblCrcVerdict.ForeColor = Color.FromArgb(198, 40, 40); // Dark Red
             }
             AppendLog("==================================================", LogType.Info);
             return isMatch;
@@ -1531,10 +1530,11 @@ namespace AT_command_test
 
             Color logColor = type switch
             {
-                LogType.Tx => Color.FromArgb(77, 208, 225),   // Cyan / Light Blue
-                LogType.Rx => Color.FromArgb(129, 199, 132),  // Light Green
-                LogType.Error => Color.FromArgb(239, 83, 80), // Red
-                LogType.Info => Color.FromArgb(255, 213, 79), // Amber / Yellow
+                LogType.Tx => Color.FromArgb(77, 208, 225),      // Cyan / Light Blue
+                LogType.Rx => Color.FromArgb(129, 199, 132),     // Light Green
+                LogType.Error => Color.FromArgb(239, 83, 80),    // Red
+                LogType.Success => Color.FromArgb(102, 187, 106),// Green
+                LogType.Info => Color.FromArgb(255, 213, 79),    // Amber / Yellow
                 _ => Color.White
             };
 
@@ -1543,6 +1543,7 @@ namespace AT_command_test
                 LogType.Tx => "TX -> ",
                 LogType.Rx => "RX <- ",
                 LogType.Error => "[ERROR] ",
+                LogType.Success => "[PASS] ",
                 LogType.Info => "[INFO] ",
                 _ => ""
             };

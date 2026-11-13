@@ -1,4 +1,4 @@
-﻿namespace AT_command_test
+namespace AT_command_test
 {
     partial class Form1
     {
