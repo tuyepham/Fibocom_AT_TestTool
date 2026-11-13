@@ -990,11 +990,11 @@ namespace AT_command_test
             }
 
             AppendLog("Download to module storage completed (+HTTPRES: received)!", LogType.Info);
-            AppendLog("Waiting 3s for module to finish writing data to flash storage...", LogType.Info);
-            lblDownloadState.Text = $"State: [Loop {currentLoop}/{totalLoops}] Flushing flash storage (waiting 3s)...";
-            lblProgress.Text = "Flushing flash (3s)...";
+            AppendLog("Waiting 5s for module to finish writing and flushing data to flash storage...", LogType.Info);
+            lblDownloadState.Text = $"State: [Loop {currentLoop}/{totalLoops}] Flushing flash storage (waiting 5s)...";
+            lblProgress.Text = "Flushing flash (5s)...";
             prg1M.Value = 40;
-            await Task.Delay(3000, ct);
+            await Task.Delay(5000, ct);
 
             // Step 5: Verify file existence and size via AT+GTFLIST
             AppendLog("--- [5/7] Verifying File Existence in Module Storage ---", LogType.Info);
@@ -1085,7 +1085,15 @@ namespace AT_command_test
                             AppendLog($"[Chunk {chunkIndex}/{totalChunks}] Read {bytesRead:N0} / {moduleFileSize:N0} bytes ({(bytesRead * 100) / moduleFileSize}%)...", LogType.Info);
                         }
 
-                        await Task.Delay(10, ct);
+                        // Adaptive delay between chunks: smaller chunks generate hundreds of commands, so allow modem RTOS/Flash to settle
+                        int interChunkDelayMs = maxChunkSize switch
+                        {
+                            <= 4 * 1024 => 60,   // 4KB or less: 60ms delay
+                            <= 16 * 1024 => 40,  // 16KB: 40ms delay
+                            <= 64 * 1024 => 25,  // 64KB: 25ms delay
+                            _ => 15              // >= 100KB: 15ms delay
+                        };
+                        await Task.Delay(interChunkDelayMs, ct);
                     }
                 }
                 finally
@@ -1238,7 +1246,7 @@ namespace AT_command_test
             // For 1KB (~90ms transfer time), allocates ~5s timeout
             // For 200KB (~18s transfer time), allocates ~27s timeout
             int dynamicTimeoutMs = Math.Max(5000, (int)((length / 9000.0) * 1000) + 4000);
-            var (success, response) = await SendAndAwaitResponseAsync($"AT+GTFREAD={fileId},{length}", new[] { "OK" }, dynamicTimeoutMs, ct, postDelayMs: 20);
+            var (success, response) = await SendAndAwaitResponseAsync($"AT+GTFREAD={fileId},{length}", new[] { "OK" }, dynamicTimeoutMs, ct, postDelayMs: 40);
             if (!success)
             {
                 return (false, Array.Empty<byte>());
